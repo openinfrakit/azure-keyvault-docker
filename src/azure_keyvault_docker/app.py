@@ -59,7 +59,7 @@ def _raise_kv_error(status_code: int, code: str, message: str) -> None:
 def _challenge_headers(settings: Settings) -> dict[str, str]:
     return {
         "WWW-Authenticate": (
-            f'Bearer authorization="{settings.authority}", '
+            f'Bearer authorization="{settings.authority}/common", '
             'resource="https://vault.azure.net"'
         )
     }

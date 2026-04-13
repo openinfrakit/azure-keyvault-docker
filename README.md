@@ -1,6 +1,6 @@
 # azure-keyvault-docker
 
-Local Azure Key Vault emulator focused on compatibility with the Python Azure SDK.
+Local Azure Key Vault emulator focused on compatibility with the official Azure SDKs for secrets.
 
 Current scope:
 - Secrets operations only
@@ -8,6 +8,7 @@ Current scope:
 - Local HTTPS endpoint because the Azure SDK requires TLS
 - Disk-backed secret persistence across restarts
 - Docker-first usage with no host certificate installation when using `connection_verify=False`
+- Tested with both Python and Java secrets SDKs
 
 ## Quick Start
 
@@ -29,9 +30,11 @@ docker run --rm -p 8443:8443 ashiqabdulkhader/azure-keyvault-docker:latest
 Docker Hub image:
 - `ashiqabdulkhader/azure-keyvault-docker`
 
-## Python SDK Usage
+## SDK Usage
 
-This emulator is designed around the official Python SDK path:
+### Python
+
+Tested with:
 - `azure-identity` for token acquisition
 - `azure-keyvault-secrets` for secrets operations
 - no pre-registered client credentials are required
@@ -46,6 +49,7 @@ credential = ClientSecretCredential(
     client_secret="any-client-secret-you-want-to-use",
     authority="127.0.0.1:8443",
     disable_instance_discovery=True,
+    additionally_allowed_tenants=["*"],
     connection_verify=False,
 )
 
@@ -57,13 +61,53 @@ client = SecretClient(
 )
 ```
 
+### Java
+
+Tested with:
+- `com.azure:azure-security-keyvault-secrets:4.8.0`
+- `com.azure:azure-identity:1.11.0`
+
+```java
+import com.azure.core.credential.TokenCredential;
+import com.azure.core.http.HttpClient;
+import com.azure.core.http.netty.NettyAsyncHttpClientBuilder;
+import com.azure.identity.ClientSecretCredentialBuilder;
+import com.azure.security.keyvault.secrets.SecretClient;
+import com.azure.security.keyvault.secrets.SecretClientBuilder;
+import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
+
+HttpClient httpClient = new NettyAsyncHttpClientBuilder(
+    reactor.netty.http.client.HttpClient.create().secure(ssl -> ssl.sslContext(
+        SslContextBuilder.forClient().trustManager(InsecureTrustManagerFactory.INSTANCE)
+    ))
+).build();
+
+TokenCredential credential = new ClientSecretCredentialBuilder()
+    .tenantId("any-tenant-id-you-want-to-use")
+    .clientId("any-client-id-you-want-to-use")
+    .clientSecret("any-client-secret-you-want-to-use")
+    .authorityHost("https://127.0.0.1:8443")
+    .disableInstanceDiscovery()
+    .additionallyAllowedTenants("*")
+    .httpClient(httpClient)
+    .build();
+
+SecretClient client = new SecretClientBuilder()
+    .vaultUrl("https://127.0.0.1:8443")
+    .credential(credential)
+    .httpClient(httpClient)
+    .disableChallengeResourceVerification()
+    .buildClient();
+```
+
 ## Sample Architecture
 
 ```text
 +------------------------+
-| Python application     |
-| - azure-identity       |
-| - azure-keyvault-*     |
+| Application            |
+| - Azure Identity SDK   |
+| - Key Vault SDK        |
 +-----------+------------+
             |
             | HTTPS requests
@@ -90,13 +134,32 @@ client = SecretClient(
 
 ## How It Works
 
-1. Your Python app creates a `ClientSecretCredential` pointing at the emulator authority.
+1. Your app creates a client credential pointing at the emulator authority.
 2. The Key Vault SDK sends an unauthenticated request to the local vault URL.
 3. The emulator responds with a Key Vault-style `WWW-Authenticate` challenge.
 4. `azure-identity` discovers the emulator's OpenID configuration and requests a token from the local token endpoint.
 5. The emulator accepts the caller-provided tenant, client ID, and client secret and issues a local token.
 6. The SDK retries the original request with a bearer token.
 7. The emulator serves the request from the local secrets store and persists changes to disk.
+
+Important compatibility note:
+- The emulator uses a `/common` challenge authority so both Python and Java SDKs can complete the Key Vault challenge flow locally.
+- Because of that, the client credential examples include wildcard multitenant allowance: `additionally_allowed_tenants=["*"]` in Python and `.additionallyAllowedTenants("*")` in Java.
+
+## Tests
+
+The SDK integration tests are split by language:
+- [tests/python/test_sdk_integration.py](/C:/Users/MUKHADE/Workspace/azure-keyvault-docker/tests/python/test_sdk_integration.py)
+- [tests/java/test_java_sdk_integration.py](/C:/Users/MUKHADE/Workspace/azure-keyvault-docker/tests/java/test_java_sdk_integration.py)
+- [tests/java/src/test/java/dev/ashiqabdulkhader/keyvaultdocker/KeyVaultJavaSdkIntegrationTest.java](/C:/Users/MUKHADE/Workspace/azure-keyvault-docker/tests/java/src/test/java/dev/ashiqabdulkhader/keyvaultdocker/KeyVaultJavaSdkIntegrationTest.java)
+
+Run everything with:
+
+```powershell
+uv run pytest
+```
+
+The Java path bootstraps repo-local Maven automatically through [tests/java/run_maven.py](/C:/Users/MUKHADE/Workspace/azure-keyvault-docker/tests/java/run_maven.py), so no global Maven or Gradle install is required.
 
 The implementation is split into:
 - [src/azure_keyvault_docker/app.py](/C:/Users/MUKHADE/Workspace/azure-keyvault-docker/src/azure_keyvault_docker/app.py): HTTP routes, API-version checks, error shaping, and paging.
@@ -109,36 +172,38 @@ The implementation is split into:
 
 ### SDK Compatibility
 
-| SDK | Status | Notes |
-| --- | --- | --- |
-| `azure-identity` | Supported | Tested with `ClientSecretCredential` against local authority. |
-| `azure-keyvault-secrets` | Supported | Primary compatibility target. |
-| `azure-keyvault-keys` | Not implemented | Keys API not started. |
-| `azure-keyvault-certificates` | Not implemented | Certificates API not started. |
+| Language | SDK | Version | Status | Notes |
+| --- | --- | --- | --- | --- |
+| Python | `azure-identity` | `1.19.x` via dev env | Supported | Tested with `ClientSecretCredential`. |
+| Python | `azure-keyvault-secrets` | `4.9.x` via dev env | Supported | Full primary integration target today. |
+| Java | `com.azure:azure-identity` | `1.11.0` | Supported | Tested with `ClientSecretCredentialBuilder`. |
+| Java | `com.azure:azure-security-keyvault-secrets` | `4.8.0` | Supported | Tested against emulator with service version `7.5`. |
+| Any | Keys SDKs | n/a | Not implemented | Keys API not started. |
+| Any | Certificates SDKs | n/a | Not implemented | Certificates API not started. |
 
 ### Operation Compatibility
 
-| Operation | SDK method | Status | Notes |
+| Operation | Python SDK | Java SDK | Notes |
 | --- | --- | --- | --- |
-| Set secret | `set_secret` | Supported | Creates a new version when the secret already exists. |
-| Get secret | `get_secret` | Supported | Latest and explicit version paths supported. |
-| Update properties | `update_secret_properties` | Supported | Supports tags, content type, enabled, `nbf`, `exp`. |
-| List secrets | `list_properties_of_secrets` | Supported | Paged responses supported. |
-| List versions | `list_properties_of_secret_versions` | Supported | Paged responses supported. |
-| Delete secret | `begin_delete_secret` | Supported | Soft-delete style flow. |
-| Get deleted secret | `get_deleted_secret` | Supported | Supported after delete. |
-| List deleted secrets | `list_deleted_secrets` | Supported | Paged responses supported. |
-| Recover deleted secret | `begin_recover_deleted_secret` | Supported | Recovers latest active secret set. |
-| Purge deleted secret | `purge_deleted_secret` | Supported | Removes deleted secret permanently from local store. |
-| Backup secret | `backup_secret` | Supported | Backup format is emulator-local, not Azure-native. |
-| Restore secret | `restore_secret_backup` | Supported | Restores all stored versions from emulator backup. |
-| Secret expiry enforcement | Read-time enforcement | Partial | Metadata is stored, but expiry/disabled checks are not fully enforced on every operation. |
-| API versions | `api-version=7.6` | Supported | Other versions currently return unsupported-version errors. |
+| Set secret | Supported | Supported | Creates a new version when the secret already exists. |
+| Get secret | Supported | Supported | Latest and explicit version paths supported. |
+| Update properties | Supported | Untested | Emulator supports tags, content type, enabled, `nbf`, `exp`. |
+| List secrets | Supported | Supported | Paged responses supported. |
+| List versions | Supported | Supported | Paged responses supported. |
+| Delete secret | Supported | Supported | Soft-delete style flow. |
+| Get deleted secret | Supported | Untested | Supported after delete. |
+| List deleted secrets | Supported | Supported | Paged responses supported. |
+| Recover deleted secret | Supported | Supported | Recovers latest active secret set. |
+| Purge deleted secret | Supported | Untested | Removes deleted secret permanently from local store. |
+| Backup secret | Supported | Untested | Backup format is emulator-local, not Azure-native. |
+| Restore secret | Supported | Untested | Restores all stored versions from emulator backup. |
+| Secret expiry enforcement | Partial | Partial | Metadata is stored, but expiry/disabled checks are not fully enforced on every operation. |
+| API versions | `7.5`, `7.6` | `7.5` tested | Other versions return unsupported-version errors. |
 
 ## Notes
 
 - The emulator generates a local self-signed certificate in `.local-certs/`.
-- For Docker-first usage, the intended path is to use the official Azure SDK with `connection_verify=False` so no local trust-store setup is required.
+- For Docker-first usage, the intended path is to disable certificate verification in the SDK client path instead of installing the local cert into the host trust store.
 - Secret state is persisted in `.local-data/secrets.json`.
 - The host and port can be overridden with `EMULATOR_HOST` and `EMULATOR_PORT`.
 - The emulator does not require `.env` or preconfigured client credentials. It accepts whatever non-empty tenant/client/secret the SDK caller provides.
