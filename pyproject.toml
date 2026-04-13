@@ -1,0 +1,35 @@
+[project]
+name = "azure-keyvault-docker"
+version = "0.1.0"
+description = "Local Azure Key Vault emulator focused on Python SDK compatibility."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=46.0.0",
+    "fastapi>=0.115.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "python-dotenv>=1.0.1",
+    "python-multipart>=0.0.12",
+    "uvicorn>=0.32.0",
+]
+
+[dependency-groups]
+dev = [
+    "azure-identity>=1.19.0",
+    "azure-keyvault-secrets>=4.9.0",
+    "httpx>=0.28.0",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.uv]
+package = true
