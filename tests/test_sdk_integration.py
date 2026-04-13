@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -20,10 +21,15 @@ ROOT = Path(__file__).resolve().parents[1]
 STATE_FILE = ROOT / ".local-data" / "secrets.json"
 SERVER_CERT_FILE = ROOT / ".local-certs" / "localhost.pem"
 SERVER_KEY_FILE = ROOT / ".local-certs" / "localhost-key.pem"
+CA_CERT_FILE = ROOT / ".local-certs" / "ca.pem"
 EMULATOR_PORT = None
 TEST_TENANT_ID = "11111111-2222-3333-4444-555555555555"
 TEST_CLIENT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 TEST_CLIENT_SECRET = "local-dev-secret"
+
+
+def httpx_verify_context() -> ssl.SSLContext:
+    return ssl.create_default_context(cafile=str(CA_CERT_FILE))
 
 
 def reserve_port() -> int:
@@ -38,7 +44,7 @@ def wait_for_server() -> None:
     deadline = time.time() + 20
     while time.time() < deadline:
         try:
-            response = httpx.get(f"https://127.0.0.1:{EMULATOR_PORT}/", verify=False)
+            response = httpx.get(f"https://127.0.0.1:{EMULATOR_PORT}/", verify=httpx_verify_context())
             if response.status_code == 200:
                 return
         except Exception:
@@ -74,13 +80,13 @@ def make_client() -> SecretClient:
         client_secret=TEST_CLIENT_SECRET,
         authority=f"127.0.0.1:{EMULATOR_PORT}",
         disable_instance_discovery=True,
-        connection_verify=False,
+        connection_verify=str(CA_CERT_FILE),
     )
     return SecretClient(
         vault_url=f"https://127.0.0.1:{EMULATOR_PORT}",
         credential=credential,
         verify_challenge_resource=False,
-        connection_verify=False,
+        connection_verify=str(CA_CERT_FILE),
     )
 
 
@@ -262,14 +268,14 @@ def test_unsupported_api_version_returns_azure_style_error(emulator):
             "client_secret": TEST_CLIENT_SECRET,
             "scope": "https://vault.azure.net/.default",
         },
-        verify=False,
+        verify=httpx_verify_context(),
     )
     token = token_response.json()["access_token"]
     response = httpx.get(
         f"https://127.0.0.1:{EMULATOR_PORT}/secrets/missing-secret",
         params={"api-version": "2099-01-01"},
         headers={"Authorization": f"Bearer {token}"},
-        verify=False,
+        verify=httpx_verify_context(),
     )
 
     assert response.status_code == 400
