@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,12 +12,14 @@ load_dotenv(Path(".env"))
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
-    host: str = "127.0.0.1"
-    port: int = 8443
-    issuer_host: str = "127.0.0.1"
-    issuer_port: int = 8443
+    host: str = Field(default="127.0.0.1", validation_alias=AliasChoices("EMULATOR_HOST", "host"))
+    port: int = Field(default=8443, validation_alias=AliasChoices("EMULATOR_PORT", "port"))
+    issuer_host: str | None = Field(default=None, validation_alias=AliasChoices("EMULATOR_ISSUER_HOST", "issuer_host"))
+    issuer_port: int | None = Field(default=None, validation_alias=AliasChoices("EMULATOR_ISSUER_PORT", "issuer_port"))
     vault_name: str = "local-vault"
     cert_dir: str = ".local-certs"
+    data_dir: str = ".local-data"
+    supported_api_versions: tuple[str, ...] = ("7.6",)
 
     kv_client_id: str = Field(alias="KV_CLIENT_ID")
     kv_client_secret: str = Field(alias="KV_CLIENT_SECRET")
@@ -25,7 +27,9 @@ class Settings(BaseSettings):
 
     @property
     def authority(self) -> str:
-        return f"https://{self.issuer_host}:{self.issuer_port}"
+        issuer_host = self.issuer_host or self.host
+        issuer_port = self.issuer_port or self.port
+        return f"https://{issuer_host}:{issuer_port}"
 
     @property
     def vault_url(self) -> str:
@@ -38,6 +42,18 @@ class Settings(BaseSettings):
     @property
     def key_path(self) -> Path:
         return Path(self.cert_dir) / "localhost-key.pem"
+
+    @property
+    def ca_cert_path(self) -> Path:
+        return Path(self.cert_dir) / "ca.pem"
+
+    @property
+    def ca_key_path(self) -> Path:
+        return Path(self.cert_dir) / "ca-key.pem"
+
+    @property
+    def state_path(self) -> Path:
+        return Path(self.data_dir) / "secrets.json"
 
 
 @lru_cache

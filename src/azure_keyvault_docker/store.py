@@ -4,6 +4,7 @@ import base64
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 
@@ -85,14 +86,46 @@ class SecretVersion:
 
 
 class SecretStore:
-    def __init__(self) -> None:
+    def __init__(self, state_path: Path | None = None) -> None:
+        self._state_path = state_path
         self._secrets: dict[str, list[SecretVersion]] = {}
         self._deleted: dict[str, SecretVersion] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if self._state_path is None or not self._state_path.exists():
+            return
+        payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+        self._secrets = {
+            name: [SecretVersion.from_dict(item) for item in versions]
+            for name, versions in payload.get("secrets", {}).items()
+        }
+        self._deleted = {
+            name: SecretVersion.from_dict(secret)
+            for name, secret in payload.get("deleted", {}).items()
+        }
+
+    def _save(self) -> None:
+        if self._state_path is None:
+            return
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "secrets": {
+                name: [version.to_dict() for version in versions]
+                for name, versions in self._secrets.items()
+            },
+            "deleted": {
+                name: secret.to_dict()
+                for name, secret in self._deleted.items()
+            },
+        }
+        self._state_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
     def set_secret(self, name: str, version: SecretVersion) -> SecretVersion:
         if name in self._deleted:
             self._deleted.pop(name, None)
         self._secrets.setdefault(name, []).append(version)
+        self._save()
         return version
 
     def has_secret(self, name: str) -> bool:
@@ -151,6 +184,7 @@ class SecretStore:
         if expires_on is not None:
             secret.expires_on = expires_on
         secret.updated_on = utc_now()
+        self._save()
         return secret
 
     def delete_secret(self, name: str) -> SecretVersion | None:
@@ -168,6 +202,7 @@ class SecretStore:
         latest.deleted_on = deleted_at
         latest.scheduled_purge_on = scheduled_purge
         self._deleted[name] = latest
+        self._save()
         return latest
 
     def get_deleted_secret(self, name: str) -> SecretVersion | None:
@@ -180,6 +215,8 @@ class SecretStore:
     def purge_deleted_secret(self, name: str) -> bool:
         deleted = self._deleted.pop(name, None)
         removed = self._secrets.pop(name, None)
+        if deleted is not None or removed is not None:
+            self._save()
         return deleted is not None or removed is not None
 
     def recover_deleted_secret(self, name: str) -> SecretVersion | None:
@@ -194,6 +231,7 @@ class SecretStore:
         self._deleted.pop(name, None)
         latest = versions[-1]
         latest.updated_on = utc_now()
+        self._save()
         return latest
 
     def backup_secret(self, name: str) -> bytes | None:
@@ -224,4 +262,5 @@ class SecretStore:
         if payload.get("deleted"):
             self._deleted[name] = SecretVersion.from_dict(payload["deleted"])
         latest = versions[-1]
+        self._save()
         return name, latest

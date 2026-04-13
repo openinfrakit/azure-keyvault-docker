@@ -13,11 +13,23 @@ from azure_keyvault_docker.store import SecretStore, SecretVersion
 
 
 app = FastAPI(title="Azure Key Vault Docker Emulator", version="0.1.0")
-store = SecretStore()
+store: SecretStore | None = None
 
 
 def get_authenticator(settings: Annotated[Settings, Depends(get_settings)]) -> Authenticator:
     return Authenticator(settings)
+
+
+def get_store() -> SecretStore:
+    global store
+    if store is None:
+        store = SecretStore(get_settings().state_path)
+    return store
+
+
+@app.on_event("startup")
+def startup_event() -> None:
+    get_store()
 
 
 def _secret_id(request: Request, name: str, version: str) -> str:
@@ -30,6 +42,43 @@ def _deleted_secret_id(request: Request, name: str) -> str:
 
 def _unix_timestamp(value: datetime | None) -> int | None:
     return int(value.timestamp()) if value else None
+
+
+def _error_payload(code: str, message: str) -> dict[str, dict[str, str]]:
+    return {"error": {"code": code, "message": message}}
+
+
+def _error_response(status_code: int, code: str, message: str, headers: dict[str, str] | None = None) -> JSONResponse:
+    return JSONResponse(status_code=status_code, content=_error_payload(code, message), headers=headers)
+
+
+def _raise_kv_error(status_code: int, code: str, message: str) -> None:
+    raise HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+def _challenge_headers(settings: Settings) -> dict[str, str]:
+    return {
+        "WWW-Authenticate": (
+            f'Bearer authorization="{settings.authority}/{settings.kv_tenant_id}", '
+            'resource="https://vault.azure.net"'
+        )
+    }
+
+
+def _validate_api_version(settings: Settings, api_version: str | None) -> str:
+    if api_version is None:
+        _raise_kv_error(
+            status.HTTP_400_BAD_REQUEST,
+            "MissingApiVersionParameter",
+            "The api-version query parameter is required.",
+        )
+    if api_version not in settings.supported_api_versions:
+        _raise_kv_error(
+            status.HTTP_400_BAD_REQUEST,
+            "UnsupportedApiVersion",
+            f"The HTTP resource that matches the request URI does not support the API version '{api_version}'.",
+        )
+    return api_version
 
 
 def _secret_attributes(secret: SecretVersion) -> dict[str, Any]:
@@ -72,10 +121,6 @@ def _items_page(items: list[dict[str, object]]) -> dict[str, object]:
     return {"value": items, "nextLink": None}
 
 
-def _error_response(status_code: int, code: str, message: str) -> JSONResponse:
-    return JSONResponse(status_code=status_code, content={"error": {"code": code, "message": message}})
-
-
 def _paged_items(
     request: Request,
     items: list[dict[str, object]],
@@ -83,10 +128,21 @@ def _paged_items(
     maxresults: int | None,
     skiptoken: str | None,
 ) -> dict[str, object]:
-    if maxresults is None or maxresults <= 0:
+    if maxresults is None:
         return _items_page(items)
+    if maxresults <= 0:
+        _raise_kv_error(
+            status.HTTP_400_BAD_REQUEST,
+            "BadParameter",
+            "The value of maxresults must be greater than 0.",
+        )
 
-    start = int(skiptoken or "0")
+    try:
+        start = int(skiptoken or "0")
+    except ValueError as exc:
+        _raise_kv_error(status.HTTP_400_BAD_REQUEST, "BadParameter", "The skiptoken value is invalid.")
+        raise AssertionError from exc
+
     end = start + maxresults
     page = items[start:end]
     next_link = None
@@ -95,21 +151,14 @@ def _paged_items(
     return {"value": page, "nextLink": next_link}
 
 
-def _challenge_headers(settings: Settings) -> dict[str, str]:
-    return {
-        "WWW-Authenticate": (
-            f'Bearer authorization="{settings.authority}/{settings.kv_tenant_id}", '
-            'resource="https://vault.azure.net"'
-        )
-    }
-
-
 def _parse_datetime(value: int | None) -> datetime | None:
     return datetime.fromtimestamp(value, tz=UTC) if value is not None else None
 
 
 def _normalize_set_body(body: dict[str, Any]) -> dict[str, Any]:
     attributes = body.get("attributes") or {}
+    if "value" not in body:
+        _raise_kv_error(status.HTTP_400_BAD_REQUEST, "BadParameter", "The request body must include a secret value.")
     return {
         "value": body["value"],
         "content_type": body.get("contentType"),
@@ -148,10 +197,13 @@ async def require_bearer_token(request: Request, call_next):
         authorization = request.headers.get("Authorization")
         try:
             Authenticator(settings).validate_token(authorization)
-        except HTTPException as exc:
-            response = _error_response(exc.status_code, str(exc.detail), str(exc.detail))
-            response.headers.update(_challenge_headers(settings))
-            return response
+        except HTTPException:
+            return _error_response(
+                status.HTTP_401_UNAUTHORIZED,
+                "Unauthorized",
+                "Request is missing a bearer or pop token.",
+                headers=_challenge_headers(settings),
+            )
 
     return await call_next(request)
 
@@ -162,6 +214,8 @@ def index(settings: Annotated[Settings, Depends(get_settings)]) -> dict[str, str
         "service": "azure-keyvault-docker",
         "vault_url": settings.vault_url,
         "authority": settings.authority,
+        "ca_cert_path": str(settings.ca_cert_path),
+        "state_path": str(settings.state_path),
     }
 
 
@@ -175,7 +229,7 @@ def issue_token(
     authenticator: Annotated[Authenticator, Depends(get_authenticator)],
 ) -> dict[str, str | int]:
     if grant_type != "client_credentials":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="unsupported_grant_type")
+        _raise_kv_error(status.HTTP_400_BAD_REQUEST, "unsupported_grant_type", "Only client_credentials is supported.")
     return authenticator.issue_token(tenant_id, client_id, client_secret, scope)
 
 
@@ -203,7 +257,8 @@ def set_secret(
     body: Annotated[dict[str, Any], Body(...)],
     api_version: Annotated[str | None, Query(alias="api-version")] = None,
 ) -> dict[str, object]:
-    _ = api_version
+    settings = get_settings()
+    _validate_api_version(settings, api_version)
     payload = _normalize_set_body(body)
     version = SecretVersion(
         version=secrets.token_hex(16),
@@ -214,7 +269,7 @@ def set_secret(
         not_before=payload["not_before"],
         expires_on=payload["expires_on"],
     )
-    store.set_secret(name, version)
+    get_store().set_secret(name, version)
     return _secret_bundle(request, name, version, include_value=True)
 
 
@@ -227,9 +282,10 @@ def update_secret(
     version: str = "",
     api_version: Annotated[str | None, Query(alias="api-version")] = None,
 ) -> dict[str, object]:
-    _ = api_version
+    settings = get_settings()
+    _validate_api_version(settings, api_version)
     payload = _normalize_update_body(body)
-    updated = store.update_secret(
+    updated = get_store().update_secret(
         name,
         version or None,
         content_type=payload["content_type"],
@@ -239,7 +295,7 @@ def update_secret(
         expires_on=payload["expires_on"],
     )
     if updated is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Secret not found")
+        _raise_kv_error(status.HTTP_404_NOT_FOUND, "SecretNotFound", f"A secret with name '{name}' was not found.")
     return _secret_bundle(request, name, updated, include_value=False)
 
 
@@ -250,10 +306,11 @@ def get_secret(
     request: Request,
     api_version: Annotated[str | None, Query(alias="api-version")] = None,
 ) -> dict[str, object]:
-    _ = api_version
-    secret = store.get_secret(name)
+    settings = get_settings()
+    _validate_api_version(settings, api_version)
+    secret = get_store().get_secret(name)
     if secret is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Secret not found")
+        _raise_kv_error(status.HTTP_404_NOT_FOUND, "SecretNotFound", f"A secret with name '{name}' was not found.")
     return _secret_bundle(request, name, secret, include_value=True)
 
 
@@ -264,14 +321,10 @@ def list_secrets(
     maxresults: int | None = None,
     skiptoken: str | None = None,
 ) -> dict[str, object]:
-    _ = api_version
-    items = [_secret_bundle(request, name, secret, include_value=False) for name, secret in store.list_properties()]
-    return _paged_items(
-        request,
-        items,
-        maxresults=maxresults,
-        skiptoken=skiptoken,
-    )
+    settings = get_settings()
+    _validate_api_version(settings, api_version)
+    items = [_secret_bundle(request, name, secret, include_value=False) for name, secret in get_store().list_properties()]
+    return _paged_items(request, items, maxresults=maxresults, skiptoken=skiptoken)
 
 
 @app.get("/secrets/{name}/versions")
@@ -282,16 +335,12 @@ def list_secret_versions(
     maxresults: int | None = None,
     skiptoken: str | None = None,
 ) -> dict[str, object]:
-    _ = api_version
-    if store.get_secret(name, include_deleted=True) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Secret not found")
-    items = [_secret_bundle(request, name, version, include_value=False) for version in store.list_versions(name)]
-    return _paged_items(
-        request,
-        items,
-        maxresults=maxresults,
-        skiptoken=skiptoken,
-    )
+    settings = get_settings()
+    _validate_api_version(settings, api_version)
+    if get_store().get_secret(name, include_deleted=True) is None:
+        _raise_kv_error(status.HTTP_404_NOT_FOUND, "SecretNotFound", f"A secret with name '{name}' was not found.")
+    items = [_secret_bundle(request, name, version, include_value=False) for version in get_store().list_versions(name)]
+    return _paged_items(request, items, maxresults=maxresults, skiptoken=skiptoken)
 
 
 @app.get("/secrets/{name}/{version}")
@@ -301,10 +350,11 @@ def get_secret_version(
     request: Request,
     api_version: Annotated[str | None, Query(alias="api-version")] = None,
 ) -> dict[str, object]:
-    _ = api_version
-    secret = store.get_secret(name, version=version)
+    settings = get_settings()
+    _validate_api_version(settings, api_version)
+    secret = get_store().get_secret(name, version=version)
     if secret is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Secret version not found")
+        _raise_kv_error(status.HTTP_404_NOT_FOUND, "SecretNotFound", f"A secret with name '{name}' was not found.")
     return _secret_bundle(request, name, secret, include_value=True)
 
 
@@ -313,10 +363,11 @@ def backup_secret(
     name: str,
     api_version: Annotated[str | None, Query(alias="api-version")] = None,
 ) -> dict[str, str]:
-    _ = api_version
-    backup_blob = store.backup_secret(name)
+    settings = get_settings()
+    _validate_api_version(settings, api_version)
+    backup_blob = get_store().backup_secret(name)
     if backup_blob is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Secret not found")
+        _raise_kv_error(status.HTTP_404_NOT_FOUND, "SecretNotFound", f"A secret with name '{name}' was not found.")
     return _backup_result(backup_blob)
 
 
@@ -326,11 +377,20 @@ def restore_secret(
     body: Annotated[dict[str, Any], Body(...)],
     api_version: Annotated[str | None, Query(alias="api-version")] = None,
 ) -> dict[str, object]:
-    _ = api_version
+    settings = get_settings()
+    _validate_api_version(settings, api_version)
+    if "value" not in body:
+        _raise_kv_error(status.HTTP_400_BAD_REQUEST, "BadParameter", "The request body must include a backup value.")
     try:
-        name, restored = store.restore_secret(body["value"])
+        name, restored = get_store().restore_secret(body["value"])
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Secret already exists: {exc.args[0]}") from exc
+        _raise_kv_error(
+            status.HTTP_409_CONFLICT,
+            "SecretAlreadyExists",
+            f"A secret with name '{exc.args[0]}' already exists.",
+        )
+    except Exception as exc:
+        _raise_kv_error(status.HTTP_400_BAD_REQUEST, "BadParameter", f"The backup blob is invalid: {exc}")
     return _secret_bundle(request, name, restored, include_value=False)
 
 
@@ -340,10 +400,11 @@ def delete_secret(
     request: Request,
     api_version: Annotated[str | None, Query(alias="api-version")] = None,
 ) -> dict[str, object]:
-    _ = api_version
-    secret = store.delete_secret(name)
+    settings = get_settings()
+    _validate_api_version(settings, api_version)
+    secret = get_store().delete_secret(name)
     if secret is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Secret not found")
+        _raise_kv_error(status.HTTP_404_NOT_FOUND, "SecretNotFound", f"A secret with name '{name}' was not found.")
     return _deleted_secret_bundle(request, name, secret, include_value=True)
 
 
@@ -354,14 +415,13 @@ def list_deleted_secrets(
     maxresults: int | None = None,
     skiptoken: str | None = None,
 ) -> dict[str, object]:
-    _ = api_version
-    items = [_deleted_secret_bundle(request, name, secret, include_value=False) for name, secret in store.list_deleted()]
-    return _paged_items(
-        request,
-        items,
-        maxresults=maxresults,
-        skiptoken=skiptoken,
-    )
+    settings = get_settings()
+    _validate_api_version(settings, api_version)
+    items = [
+        _deleted_secret_bundle(request, name, secret, include_value=False)
+        for name, secret in get_store().list_deleted()
+    ]
+    return _paged_items(request, items, maxresults=maxresults, skiptoken=skiptoken)
 
 
 @app.get("/deletedsecrets/{name}")
@@ -370,10 +430,15 @@ def get_deleted_secret(
     request: Request,
     api_version: Annotated[str | None, Query(alias="api-version")] = None,
 ) -> dict[str, object]:
-    _ = api_version
-    secret = store.get_deleted_secret(name)
+    settings = get_settings()
+    _validate_api_version(settings, api_version)
+    secret = get_store().get_deleted_secret(name)
     if secret is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deleted secret not found")
+        _raise_kv_error(
+            status.HTTP_404_NOT_FOUND,
+            "SecretNotFound",
+            f"A deleted secret with name '{name}' was not found.",
+        )
     return _deleted_secret_bundle(request, name, secret, include_value=True)
 
 
@@ -383,10 +448,15 @@ def recover_deleted_secret(
     request: Request,
     api_version: Annotated[str | None, Query(alias="api-version")] = None,
 ) -> dict[str, object]:
-    _ = api_version
-    secret = store.recover_deleted_secret(name)
+    settings = get_settings()
+    _validate_api_version(settings, api_version)
+    secret = get_store().recover_deleted_secret(name)
     if secret is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deleted secret not found")
+        _raise_kv_error(
+            status.HTTP_404_NOT_FOUND,
+            "SecretNotFound",
+            f"A deleted secret with name '{name}' was not found.",
+        )
     return _secret_bundle(request, name, secret, include_value=True)
 
 
@@ -395,17 +465,22 @@ def purge_deleted_secret(
     name: str,
     api_version: Annotated[str | None, Query(alias="api-version")] = None,
 ) -> Response:
-    _ = api_version
-    purged = store.purge_deleted_secret(name)
+    settings = get_settings()
+    _validate_api_version(settings, api_version)
+    purged = get_store().purge_deleted_secret(name)
     if not purged:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deleted secret not found")
+        _raise_kv_error(
+            status.HTTP_404_NOT_FOUND,
+            "SecretNotFound",
+            f"A deleted secret with name '{name}' was not found.",
+        )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.exception_handler(HTTPException)
 def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
-    content = {"error": {"code": str(exc.detail), "message": str(exc.detail)}}
+    detail = exc.detail if isinstance(exc.detail, dict) else {"code": str(exc.detail), "message": str(exc.detail)}
     if exc.status_code == status.HTTP_401_UNAUTHORIZED:
         settings = get_settings()
-        return JSONResponse(status_code=exc.status_code, content=content, headers=_challenge_headers(settings))
-    return JSONResponse(status_code=exc.status_code, content=content)
+        return JSONResponse(status_code=exc.status_code, content={"error": detail}, headers=_challenge_headers(settings))
+    return JSONResponse(status_code=exc.status_code, content={"error": detail})

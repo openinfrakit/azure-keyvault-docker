@@ -139,6 +139,7 @@ celerybeat.pid
 .envrc
 .venv
 .local-certs/
+.local-data/
 .pytest_cache/
 env/
 venv/

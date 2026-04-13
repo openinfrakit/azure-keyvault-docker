@@ -14,9 +14,10 @@ from azure_keyvault_docker.config import Settings
 def ensure_localhost_certificate(settings: Settings) -> None:
     cert_path = settings.cert_path
     key_path = settings.key_path
+    ca_cert_path = settings.ca_cert_path
     cert_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if cert_path.exists() and key_path.exists():
+    if cert_path.exists() and key_path.exists() and ca_cert_path.exists():
         return
 
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -45,10 +46,35 @@ def ensure_localhost_certificate(settings: Settings) -> None:
             ),
             critical=False,
         )
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_encipherment=True,
+                key_cert_sign=True,
+                key_agreement=False,
+                content_commitment=False,
+                data_encipherment=False,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(private_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(private_key.public_key()),
+            critical=False,
+        )
         .sign(private_key=private_key, algorithm=hashes.SHA256())
     )
 
-    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    cert_bytes = certificate.public_bytes(serialization.Encoding.PEM)
+    ca_cert_path.write_bytes(cert_bytes)
+    cert_path.write_bytes(cert_bytes)
     key_path.write_bytes(
         private_key.private_bytes(
             encoding=serialization.Encoding.PEM,

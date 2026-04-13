@@ -1,20 +1,34 @@
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import pytest
-from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+import httpx
+from azure.core.exceptions import HttpResponseError, ResourceExistsError, ResourceNotFoundError
 from azure.identity import ClientSecretCredential
 from azure.keyvault.secrets import SecretClient
 from dotenv import load_dotenv
+from azure_keyvault_docker.certs import ensure_localhost_certificate
+from azure_keyvault_docker.config import get_settings
 
 
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
+STATE_FILE = ROOT / ".local-data" / "secrets.json"
+SERVER_CERT_FILE = ROOT / ".local-certs" / "localhost.pem"
+SERVER_KEY_FILE = ROOT / ".local-certs" / "localhost-key.pem"
+EMULATOR_PORT = None
+
+
+def reserve_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 
 
 def wait_for_server() -> None:
@@ -23,7 +37,7 @@ def wait_for_server() -> None:
     deadline = time.time() + 20
     while time.time() < deadline:
         try:
-            response = httpx.get("https://127.0.0.1:8443/", verify=False)
+            response = httpx.get(f"https://127.0.0.1:{EMULATOR_PORT}/", verify=False)
             if response.status_code == 200:
                 return
         except Exception:
@@ -32,8 +46,41 @@ def wait_for_server() -> None:
     raise RuntimeError("server did not start")
 
 
+def launch_emulator(env: dict[str, str]) -> subprocess.Popen:
+    return subprocess.Popen(
+        [sys.executable, "-m", "azure_keyvault_docker"],
+        cwd=ROOT,
+        env=env,
+    )
+
+
+def make_client() -> SecretClient:
+    credential = ClientSecretCredential(
+        tenant_id=os.environ["KV_TENANT_ID"],
+        client_id=os.environ["KV_CLIENT_ID"],
+        client_secret=os.environ["KV_CLIENT_SECRET"],
+        authority=f"127.0.0.1:{EMULATOR_PORT}",
+        disable_instance_discovery=True,
+        connection_verify=False,
+    )
+    return SecretClient(
+        vault_url=f"https://127.0.0.1:{EMULATOR_PORT}",
+        credential=credential,
+        verify_challenge_resource=False,
+        connection_verify=False,
+    )
+
+
 @pytest.fixture(scope="session")
 def emulator():
+    global EMULATOR_PORT
+    EMULATOR_PORT = reserve_port()
+    for cert_path in (SERVER_CERT_FILE, SERVER_KEY_FILE):
+        if cert_path.exists():
+            cert_path.unlink()
+    ensure_localhost_certificate(get_settings())
+    if STATE_FILE.exists():
+        STATE_FILE.unlink()
     env = os.environ.copy()
     env.update({
         key: value
@@ -44,19 +91,12 @@ def emulator():
         }.items()
         if value
     })
-    cert_file = ROOT / ".local-certs" / "localhost.pem"
-    env["REQUESTS_CA_BUNDLE"] = str(cert_file)
-    env["SSL_CERT_FILE"] = str(cert_file)
-    os.environ["REQUESTS_CA_BUNDLE"] = str(cert_file)
-    os.environ["SSL_CERT_FILE"] = str(cert_file)
-    process = subprocess.Popen(
-        [sys.executable, "-m", "azure_keyvault_docker"],
-        cwd=ROOT,
-        env=env,
-    )
+    env["EMULATOR_PORT"] = str(EMULATOR_PORT)
+    env["EMULATOR_ISSUER_PORT"] = str(EMULATOR_PORT)
+    process = launch_emulator(env)
     try:
         wait_for_server()
-        yield process
+        yield {"process": process, "env": env}
     finally:
         process.terminate()
         process.wait(timeout=10)
@@ -64,18 +104,7 @@ def emulator():
 
 def test_secret_crud_via_azure_sdk(emulator):
     _ = emulator
-    credential = ClientSecretCredential(
-        tenant_id=os.environ["KV_TENANT_ID"],
-        client_id=os.environ["KV_CLIENT_ID"],
-        client_secret=os.environ["KV_CLIENT_SECRET"],
-        authority="127.0.0.1:8443",
-        disable_instance_discovery=True,
-    )
-    client = SecretClient(
-        vault_url="https://127.0.0.1:8443",
-        credential=credential,
-        verify_challenge_resource=False,
-    )
+    client = make_client()
 
     created = client.set_secret("example-secret", "hello")
     fetched = client.get_secret("example-secret")
@@ -90,18 +119,7 @@ def test_secret_crud_via_azure_sdk(emulator):
 
 def test_secret_versions_and_properties_via_azure_sdk(emulator):
     _ = emulator
-    credential = ClientSecretCredential(
-        tenant_id=os.environ["KV_TENANT_ID"],
-        client_id=os.environ["KV_CLIENT_ID"],
-        client_secret=os.environ["KV_CLIENT_SECRET"],
-        authority="127.0.0.1:8443",
-        disable_instance_discovery=True,
-    )
-    client = SecretClient(
-        vault_url="https://127.0.0.1:8443",
-        credential=credential,
-        verify_challenge_resource=False,
-    )
+    client = make_client()
 
     first = client.set_secret("versioned-secret", "v1", tags={"stage": "one"}, content_type="text/plain")
     second = client.set_secret("versioned-secret", "v2")
@@ -128,18 +146,7 @@ def test_secret_versions_and_properties_via_azure_sdk(emulator):
 
 def test_deleted_secret_recover_and_purge_via_azure_sdk(emulator):
     _ = emulator
-    credential = ClientSecretCredential(
-        tenant_id=os.environ["KV_TENANT_ID"],
-        client_id=os.environ["KV_CLIENT_ID"],
-        client_secret=os.environ["KV_CLIENT_SECRET"],
-        authority="127.0.0.1:8443",
-        disable_instance_discovery=True,
-    )
-    client = SecretClient(
-        vault_url="https://127.0.0.1:8443",
-        credential=credential,
-        verify_challenge_resource=False,
-    )
+    client = make_client()
 
     client.set_secret("recoverable-secret", "recover-me", tags={"kind": "demo"})
     deleted = client.begin_delete_secret("recoverable-secret").result()
@@ -158,18 +165,7 @@ def test_deleted_secret_recover_and_purge_via_azure_sdk(emulator):
 
 def test_backup_and_restore_via_azure_sdk(emulator):
     _ = emulator
-    credential = ClientSecretCredential(
-        tenant_id=os.environ["KV_TENANT_ID"],
-        client_id=os.environ["KV_CLIENT_ID"],
-        client_secret=os.environ["KV_CLIENT_SECRET"],
-        authority="127.0.0.1:8443",
-        disable_instance_discovery=True,
-    )
-    client = SecretClient(
-        vault_url="https://127.0.0.1:8443",
-        credential=credential,
-        verify_challenge_resource=False,
-    )
+    client = make_client()
 
     original = client.set_secret("backup-secret", "alpha", tags={"source": "test"}, content_type="text/plain")
     client.set_secret("backup-secret", "beta")
@@ -191,18 +187,7 @@ def test_backup_and_restore_via_azure_sdk(emulator):
 
 def test_restore_conflicts_when_secret_exists(emulator):
     _ = emulator
-    credential = ClientSecretCredential(
-        tenant_id=os.environ["KV_TENANT_ID"],
-        client_id=os.environ["KV_CLIENT_ID"],
-        client_secret=os.environ["KV_CLIENT_SECRET"],
-        authority="127.0.0.1:8443",
-        disable_instance_discovery=True,
-    )
-    client = SecretClient(
-        vault_url="https://127.0.0.1:8443",
-        credential=credential,
-        verify_challenge_resource=False,
-    )
+    client = make_client()
 
     client.set_secret("restore-conflict-secret", "first")
     backup = client.backup_secret("restore-conflict-secret")
@@ -213,18 +198,7 @@ def test_restore_conflicts_when_secret_exists(emulator):
 
 def test_paged_secret_listings_via_azure_sdk(emulator):
     _ = emulator
-    credential = ClientSecretCredential(
-        tenant_id=os.environ["KV_TENANT_ID"],
-        client_id=os.environ["KV_CLIENT_ID"],
-        client_secret=os.environ["KV_CLIENT_SECRET"],
-        authority="127.0.0.1:8443",
-        disable_instance_discovery=True,
-    )
-    client = SecretClient(
-        vault_url="https://127.0.0.1:8443",
-        credential=credential,
-        verify_challenge_resource=False,
-    )
+    client = make_client()
 
     secret_names = [f"paged-secret-{index}" for index in range(5)]
     for index, name in enumerate(secret_names):
@@ -238,18 +212,7 @@ def test_paged_secret_listings_via_azure_sdk(emulator):
 
 def test_paged_version_and_deleted_listings_via_azure_sdk(emulator):
     _ = emulator
-    credential = ClientSecretCredential(
-        tenant_id=os.environ["KV_TENANT_ID"],
-        client_id=os.environ["KV_CLIENT_ID"],
-        client_secret=os.environ["KV_CLIENT_SECRET"],
-        authority="127.0.0.1:8443",
-        disable_instance_discovery=True,
-    )
-    client = SecretClient(
-        vault_url="https://127.0.0.1:8443",
-        credential=credential,
-        verify_challenge_resource=False,
-    )
+    client = make_client()
 
     client.set_secret("paged-versions-secret", "v1")
     client.set_secret("paged-versions-secret", "v2")
@@ -268,3 +231,45 @@ def test_paged_version_and_deleted_listings_via_azure_sdk(emulator):
     assert len(version_ids) == 3
     for name in deleted_names:
         assert name in listed_deleted_names
+
+
+def test_secrets_persist_to_disk_across_restart(emulator):
+    client = make_client()
+    created = client.set_secret("persistent-secret", "survives-restart")
+    assert STATE_FILE.exists()
+
+    emulator["process"].terminate()
+    emulator["process"].wait(timeout=10)
+    emulator["process"] = launch_emulator(emulator["env"])
+    wait_for_server()
+
+    restarted_client = make_client()
+    fetched = restarted_client.get_secret("persistent-secret")
+
+    assert fetched.value == "survives-restart"
+    assert fetched.properties.version == created.properties.version
+
+
+def test_unsupported_api_version_returns_azure_style_error(emulator):
+    _ = emulator
+    token_response = httpx.post(
+        f"https://127.0.0.1:{EMULATOR_PORT}/{os.environ['KV_TENANT_ID']}/oauth2/v2.0/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": os.environ["KV_CLIENT_ID"],
+            "client_secret": os.environ["KV_CLIENT_SECRET"],
+            "scope": "https://vault.azure.net/.default",
+        },
+        verify=False,
+    )
+    token = token_response.json()["access_token"]
+    response = httpx.get(
+        f"https://127.0.0.1:{EMULATOR_PORT}/secrets/missing-secret",
+        params={"api-version": "2099-01-01"},
+        headers={"Authorization": f"Bearer {token}"},
+        verify=False,
+    )
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["error"]["code"] == "UnsupportedApiVersion"
