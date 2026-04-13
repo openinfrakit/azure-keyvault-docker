@@ -76,6 +76,25 @@ def _error_response(status_code: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(status_code=status_code, content={"error": {"code": code, "message": message}})
 
 
+def _paged_items(
+    request: Request,
+    items: list[dict[str, object]],
+    *,
+    maxresults: int | None,
+    skiptoken: str | None,
+) -> dict[str, object]:
+    if maxresults is None or maxresults <= 0:
+        return _items_page(items)
+
+    start = int(skiptoken or "0")
+    end = start + maxresults
+    page = items[start:end]
+    next_link = None
+    if end < len(items):
+        next_link = str(request.url.include_query_params(skiptoken=str(end), maxresults=maxresults))
+    return {"value": page, "nextLink": next_link}
+
+
 def _challenge_headers(settings: Settings) -> dict[str, str]:
     return {
         "WWW-Authenticate": (
@@ -243,11 +262,15 @@ def list_secrets(
     request: Request,
     api_version: Annotated[str | None, Query(alias="api-version")] = None,
     maxresults: int | None = None,
+    skiptoken: str | None = None,
 ) -> dict[str, object]:
     _ = api_version
-    _ = maxresults
-    return _items_page(
-        [_secret_bundle(request, name, secret, include_value=False) for name, secret in store.list_properties()]
+    items = [_secret_bundle(request, name, secret, include_value=False) for name, secret in store.list_properties()]
+    return _paged_items(
+        request,
+        items,
+        maxresults=maxresults,
+        skiptoken=skiptoken,
     )
 
 
@@ -257,12 +280,18 @@ def list_secret_versions(
     request: Request,
     api_version: Annotated[str | None, Query(alias="api-version")] = None,
     maxresults: int | None = None,
+    skiptoken: str | None = None,
 ) -> dict[str, object]:
     _ = api_version
-    _ = maxresults
     if store.get_secret(name, include_deleted=True) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Secret not found")
-    return _items_page([_secret_bundle(request, name, version, include_value=False) for version in store.list_versions(name)])
+    items = [_secret_bundle(request, name, version, include_value=False) for version in store.list_versions(name)]
+    return _paged_items(
+        request,
+        items,
+        maxresults=maxresults,
+        skiptoken=skiptoken,
+    )
 
 
 @app.get("/secrets/{name}/{version}")
@@ -323,11 +352,15 @@ def list_deleted_secrets(
     request: Request,
     api_version: Annotated[str | None, Query(alias="api-version")] = None,
     maxresults: int | None = None,
+    skiptoken: str | None = None,
 ) -> dict[str, object]:
     _ = api_version
-    _ = maxresults
-    return _items_page(
-        [_deleted_secret_bundle(request, name, secret, include_value=False) for name, secret in store.list_deleted()]
+    items = [_deleted_secret_bundle(request, name, secret, include_value=False) for name, secret in store.list_deleted()]
+    return _paged_items(
+        request,
+        items,
+        maxresults=maxresults,
+        skiptoken=skiptoken,
     )
 
 

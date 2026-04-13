@@ -209,3 +209,62 @@ def test_restore_conflicts_when_secret_exists(emulator):
 
     with pytest.raises(ResourceExistsError):
         client.restore_secret_backup(backup)
+
+
+def test_paged_secret_listings_via_azure_sdk(emulator):
+    _ = emulator
+    credential = ClientSecretCredential(
+        tenant_id=os.environ["KV_TENANT_ID"],
+        client_id=os.environ["KV_CLIENT_ID"],
+        client_secret=os.environ["KV_CLIENT_SECRET"],
+        authority="127.0.0.1:8443",
+        disable_instance_discovery=True,
+    )
+    client = SecretClient(
+        vault_url="https://127.0.0.1:8443",
+        credential=credential,
+        verify_challenge_resource=False,
+    )
+
+    secret_names = [f"paged-secret-{index}" for index in range(5)]
+    for index, name in enumerate(secret_names):
+        client.set_secret(name, f"value-{index}")
+
+    listed_names = [item.name for item in client.list_properties_of_secrets(max_page_size=2)]
+
+    for name in secret_names:
+        assert name in listed_names
+
+
+def test_paged_version_and_deleted_listings_via_azure_sdk(emulator):
+    _ = emulator
+    credential = ClientSecretCredential(
+        tenant_id=os.environ["KV_TENANT_ID"],
+        client_id=os.environ["KV_CLIENT_ID"],
+        client_secret=os.environ["KV_CLIENT_SECRET"],
+        authority="127.0.0.1:8443",
+        disable_instance_discovery=True,
+    )
+    client = SecretClient(
+        vault_url="https://127.0.0.1:8443",
+        credential=credential,
+        verify_challenge_resource=False,
+    )
+
+    client.set_secret("paged-versions-secret", "v1")
+    client.set_secret("paged-versions-secret", "v2")
+    client.set_secret("paged-versions-secret", "v3")
+    version_ids = [item.version for item in client.list_properties_of_secret_versions("paged-versions-secret", max_page_size=1)]
+
+    deleted_names = []
+    for index in range(3):
+        name = f"paged-deleted-secret-{index}"
+        client.set_secret(name, f"value-{index}")
+        client.begin_delete_secret(name).result()
+        deleted_names.append(name)
+
+    listed_deleted_names = [item.name for item in client.list_deleted_secrets(max_page_size=1)]
+
+    assert len(version_ids) == 3
+    for name in deleted_names:
+        assert name in listed_deleted_names
