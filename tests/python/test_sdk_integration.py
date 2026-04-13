@@ -11,6 +11,7 @@ from conftest import (
     TEST_TENANT_ID,
     launch_emulator,
     make_python_client,
+    stop_process,
     wait_for_server,
 )
 
@@ -144,8 +145,7 @@ def test_secrets_persist_to_disk_across_restart(emulator):
     created = client.set_secret("persistent-secret", "survives-restart")
     assert STATE_FILE.exists()
 
-    emulator["process"].terminate()
-    emulator["process"].wait(timeout=10)
+    stop_process(emulator["process"])
     emulator["process"] = launch_emulator(emulator["env"])
     wait_for_server(emulator["port"])
 

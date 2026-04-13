@@ -52,6 +52,18 @@ def launch_emulator(env: dict[str, str]) -> subprocess.Popen:
     )
 
 
+def stop_process(process: subprocess.Popen, timeout: float = 10) -> None:
+    if process.poll() is not None:
+        return
+
+    process.terminate()
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=timeout)
+
+
 def make_python_client(port: int) -> SecretClient:
     credential = ClientSecretCredential(
         tenant_id=TEST_TENANT_ID,
@@ -88,5 +100,4 @@ def emulator():
         wait_for_server(port)
         yield {"process": process, "env": env, "port": port}
     finally:
-        process.terminate()
-        process.wait(timeout=10)
+        stop_process(process)
