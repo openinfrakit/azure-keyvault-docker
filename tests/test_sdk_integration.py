@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+from azure.core.exceptions import ResourceNotFoundError
+from azure.identity import ClientSecretCredential
+from azure.keyvault.secrets import SecretClient
+from dotenv import load_dotenv
+
+
+ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(ROOT / ".env")
+
+
+def wait_for_server() -> None:
+    import httpx
+
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        try:
+            response = httpx.get("https://127.0.0.1:8443/", verify=False)
+            if response.status_code == 200:
+                return
+        except Exception:
+            pass
+        time.sleep(0.25)
+    raise RuntimeError("server did not start")
+
+
+@pytest.fixture(scope="session")
+def emulator():
+    env = os.environ.copy()
+    env.update({
+        key: value
+        for key, value in {
+            "KV_CLIENT_ID": os.environ.get("KV_CLIENT_ID"),
+            "KV_CLIENT_SECRET": os.environ.get("KV_CLIENT_SECRET"),
+            "KV_TENANT_ID": os.environ.get("KV_TENANT_ID"),
+        }.items()
+        if value
+    })
+    cert_file = ROOT / ".local-certs" / "localhost.pem"
+    env["REQUESTS_CA_BUNDLE"] = str(cert_file)
+    env["SSL_CERT_FILE"] = str(cert_file)
+    os.environ["REQUESTS_CA_BUNDLE"] = str(cert_file)
+    os.environ["SSL_CERT_FILE"] = str(cert_file)
+    process = subprocess.Popen(
+        [sys.executable, "-m", "azure_keyvault_docker"],
+        cwd=ROOT,
+        env=env,
+    )
+    try:
+        wait_for_server()
+        yield process
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+
+def test_secret_crud_via_azure_sdk(emulator):
+    _ = emulator
+    credential = ClientSecretCredential(
+        tenant_id=os.environ["KV_TENANT_ID"],
+        client_id=os.environ["KV_CLIENT_ID"],
+        client_secret=os.environ["KV_CLIENT_SECRET"],
+        authority="127.0.0.1:8443",
+        disable_instance_discovery=True,
+    )
+    client = SecretClient(
+        vault_url="https://127.0.0.1:8443",
+        credential=credential,
+        verify_challenge_resource=False,
+    )
+
+    created = client.set_secret("example-secret", "hello")
+    fetched = client.get_secret("example-secret")
+    names = [item.name for item in client.list_properties_of_secrets()]
+    deleted = client.begin_delete_secret("example-secret").result()
+
+    assert created.value == "hello"
+    assert fetched.value == "hello"
+    assert "example-secret" in names
+    assert deleted.name == "example-secret"
+
+
+def test_secret_versions_and_properties_via_azure_sdk(emulator):
+    _ = emulator
+    credential = ClientSecretCredential(
+        tenant_id=os.environ["KV_TENANT_ID"],
+        client_id=os.environ["KV_CLIENT_ID"],
+        client_secret=os.environ["KV_CLIENT_SECRET"],
+        authority="127.0.0.1:8443",
+        disable_instance_discovery=True,
+    )
+    client = SecretClient(
+        vault_url="https://127.0.0.1:8443",
+        credential=credential,
+        verify_challenge_resource=False,
+    )
+
+    first = client.set_secret("versioned-secret", "v1", tags={"stage": "one"}, content_type="text/plain")
+    second = client.set_secret("versioned-secret", "v2")
+    props = client.update_secret_properties(
+        "versioned-secret",
+        second.properties.version,
+        tags={"stage": "two"},
+        content_type="application/custom",
+        enabled=False,
+    )
+    versions = list(client.list_properties_of_secret_versions("versioned-secret"))
+    fetched_first = client.get_secret("versioned-secret", first.properties.version)
+    fetched_second = client.get_secret("versioned-secret")
+
+    assert first.value == "v1"
+    assert fetched_first.value == "v1"
+    assert fetched_second.value == "v2"
+    assert props.version == second.properties.version
+    assert props.tags == {"stage": "two"}
+    assert props.content_type == "application/custom"
+    assert props.enabled is False
+    assert {item.version for item in versions} == {first.properties.version, second.properties.version}
+
+
+def test_deleted_secret_recover_and_purge_via_azure_sdk(emulator):
+    _ = emulator
+    credential = ClientSecretCredential(
+        tenant_id=os.environ["KV_TENANT_ID"],
+        client_id=os.environ["KV_CLIENT_ID"],
+        client_secret=os.environ["KV_CLIENT_SECRET"],
+        authority="127.0.0.1:8443",
+        disable_instance_discovery=True,
+    )
+    client = SecretClient(
+        vault_url="https://127.0.0.1:8443",
+        credential=credential,
+        verify_challenge_resource=False,
+    )
+
+    client.set_secret("recoverable-secret", "recover-me", tags={"kind": "demo"})
+    deleted = client.begin_delete_secret("recoverable-secret").result()
+    deleted_list = list(client.list_deleted_secrets())
+    recovered = client.begin_recover_deleted_secret("recoverable-secret").result()
+    client.begin_delete_secret("recoverable-secret").result()
+    client.purge_deleted_secret("recoverable-secret")
+
+    assert deleted.name == "recoverable-secret"
+    assert any(item.name == "recoverable-secret" for item in deleted_list)
+    assert recovered.name == "recoverable-secret"
+
+    with pytest.raises(ResourceNotFoundError):
+        client.get_deleted_secret("recoverable-secret")
