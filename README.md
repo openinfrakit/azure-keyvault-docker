@@ -22,9 +22,12 @@ uv run python -m azure_keyvault_docker
 Run with Docker:
 
 ```powershell
-docker build -t azure-keyvault-docker .
-docker run --rm -p 8443:8443 azure-keyvault-docker
+docker pull ashiqabdulkhader/azure-keyvault-docker:latest
+docker run --rm -p 8443:8443 ashiqabdulkhader/azure-keyvault-docker:latest
 ```
+
+Docker Hub image:
+- `ashiqabdulkhader/azure-keyvault-docker`
 
 ## Python SDK Usage
 
