@@ -72,6 +72,10 @@ def _items_page(items: list[dict[str, object]]) -> dict[str, object]:
     return {"value": items, "nextLink": None}
 
 
+def _error_response(status_code: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse(status_code=status_code, content={"error": {"code": code, "message": message}})
+
+
 def _challenge_headers(settings: Settings) -> dict[str, str]:
     return {
         "WWW-Authenticate": (
@@ -108,6 +112,10 @@ def _normalize_update_body(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _backup_result(blob: bytes) -> dict[str, str]:
+    return {"value": blob.decode("ascii")}
+
+
 @app.middleware("http")
 async def require_bearer_token(request: Request, call_next):
     if request.url.path == "/" or request.url.path.endswith("/oauth2/v2.0/token"):
@@ -122,11 +130,9 @@ async def require_bearer_token(request: Request, call_next):
         try:
             Authenticator(settings).validate_token(authorization)
         except HTTPException as exc:
-            return JSONResponse(
-                status_code=exc.status_code,
-                content={"error": {"code": exc.detail, "message": exc.detail}},
-                headers=_challenge_headers(settings),
-            )
+            response = _error_response(exc.status_code, str(exc.detail), str(exc.detail))
+            response.headers.update(_challenge_headers(settings))
+            return response
 
     return await call_next(request)
 
@@ -273,6 +279,32 @@ def get_secret_version(
     return _secret_bundle(request, name, secret, include_value=True)
 
 
+@app.post("/secrets/{name}/backup")
+def backup_secret(
+    name: str,
+    api_version: Annotated[str | None, Query(alias="api-version")] = None,
+) -> dict[str, str]:
+    _ = api_version
+    backup_blob = store.backup_secret(name)
+    if backup_blob is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Secret not found")
+    return _backup_result(backup_blob)
+
+
+@app.post("/secrets/restore")
+def restore_secret(
+    request: Request,
+    body: Annotated[dict[str, Any], Body(...)],
+    api_version: Annotated[str | None, Query(alias="api-version")] = None,
+) -> dict[str, object]:
+    _ = api_version
+    try:
+        name, restored = store.restore_secret(body["value"])
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Secret already exists: {exc.args[0]}") from exc
+    return _secret_bundle(request, name, restored, include_value=False)
+
+
 @app.delete("/secrets/{name}")
 def delete_secret(
     name: str,
@@ -339,7 +371,7 @@ def purge_deleted_secret(
 
 @app.exception_handler(HTTPException)
 def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
-    content = {"error": {"code": exc.detail, "message": exc.detail}}
+    content = {"error": {"code": str(exc.detail), "message": str(exc.detail)}}
     if exc.status_code == status.HTTP_401_UNAUTHORIZED:
         settings = get_settings()
         return JSONResponse(status_code=exc.status_code, content=content, headers=_challenge_headers(settings))

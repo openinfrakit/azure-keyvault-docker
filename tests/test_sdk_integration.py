@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 import pytest
-from azure.core.exceptions import ResourceNotFoundError
+from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.identity import ClientSecretCredential
 from azure.keyvault.secrets import SecretClient
 from dotenv import load_dotenv
@@ -154,3 +154,58 @@ def test_deleted_secret_recover_and_purge_via_azure_sdk(emulator):
 
     with pytest.raises(ResourceNotFoundError):
         client.get_deleted_secret("recoverable-secret")
+
+
+def test_backup_and_restore_via_azure_sdk(emulator):
+    _ = emulator
+    credential = ClientSecretCredential(
+        tenant_id=os.environ["KV_TENANT_ID"],
+        client_id=os.environ["KV_CLIENT_ID"],
+        client_secret=os.environ["KV_CLIENT_SECRET"],
+        authority="127.0.0.1:8443",
+        disable_instance_discovery=True,
+    )
+    client = SecretClient(
+        vault_url="https://127.0.0.1:8443",
+        credential=credential,
+        verify_challenge_resource=False,
+    )
+
+    original = client.set_secret("backup-secret", "alpha", tags={"source": "test"}, content_type="text/plain")
+    client.set_secret("backup-secret", "beta")
+    backup = client.backup_secret("backup-secret")
+    client.begin_delete_secret("backup-secret").result()
+    client.purge_deleted_secret("backup-secret")
+
+    restored = client.restore_secret_backup(backup)
+    fetched = client.get_secret("backup-secret")
+    versions = list(client.list_properties_of_secret_versions("backup-secret"))
+
+    assert isinstance(backup, bytes)
+    assert original.value == "alpha"
+    assert restored.name == "backup-secret"
+    assert fetched.value == "beta"
+    assert fetched.properties.version == restored.version
+    assert len(versions) == 2
+
+
+def test_restore_conflicts_when_secret_exists(emulator):
+    _ = emulator
+    credential = ClientSecretCredential(
+        tenant_id=os.environ["KV_TENANT_ID"],
+        client_id=os.environ["KV_CLIENT_ID"],
+        client_secret=os.environ["KV_CLIENT_SECRET"],
+        authority="127.0.0.1:8443",
+        disable_instance_discovery=True,
+    )
+    client = SecretClient(
+        vault_url="https://127.0.0.1:8443",
+        credential=credential,
+        verify_challenge_resource=False,
+    )
+
+    client.set_secret("restore-conflict-secret", "first")
+    backup = client.backup_secret("restore-conflict-secret")
+
+    with pytest.raises(ResourceExistsError):
+        client.restore_secret_backup(backup)

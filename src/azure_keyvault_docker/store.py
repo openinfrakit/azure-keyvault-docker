@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import base64
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _dt_to_str(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _dt_from_str(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
 
 
 @dataclass
@@ -39,6 +50,39 @@ class SecretVersion:
             recovery_id=self.recovery_id,
         )
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "value": self.value,
+            "content_type": self.content_type,
+            "tags": dict(self.tags),
+            "enabled": self.enabled,
+            "not_before": _dt_to_str(self.not_before),
+            "expires_on": _dt_to_str(self.expires_on),
+            "created_on": _dt_to_str(self.created_on),
+            "updated_on": _dt_to_str(self.updated_on),
+            "deleted_on": _dt_to_str(self.deleted_on),
+            "scheduled_purge_on": _dt_to_str(self.scheduled_purge_on),
+            "recovery_id": self.recovery_id,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "SecretVersion":
+        return cls(
+            version=payload["version"],
+            value=payload["value"],
+            content_type=payload.get("content_type"),
+            tags=dict(payload.get("tags") or {}),
+            enabled=payload.get("enabled", True),
+            not_before=_dt_from_str(payload.get("not_before")),
+            expires_on=_dt_from_str(payload.get("expires_on")),
+            created_on=_dt_from_str(payload.get("created_on")) or utc_now(),
+            updated_on=_dt_from_str(payload.get("updated_on")) or utc_now(),
+            deleted_on=_dt_from_str(payload.get("deleted_on")),
+            scheduled_purge_on=_dt_from_str(payload.get("scheduled_purge_on")),
+            recovery_id=payload.get("recovery_id"),
+        )
+
 
 class SecretStore:
     def __init__(self) -> None:
@@ -50,6 +94,9 @@ class SecretStore:
             self._deleted.pop(name, None)
         self._secrets.setdefault(name, []).append(version)
         return version
+
+    def has_secret(self, name: str) -> bool:
+        return name in self._secrets
 
     def list_properties(self) -> list[tuple[str, SecretVersion]]:
         items: list[tuple[str, SecretVersion]] = []
@@ -148,3 +195,33 @@ class SecretStore:
         latest = versions[-1]
         latest.updated_on = utc_now()
         return latest
+
+    def backup_secret(self, name: str) -> bytes | None:
+        versions = self._secrets.get(name)
+        if not versions:
+            return None
+
+        payload = {
+            "name": name,
+            "versions": [version.to_dict() for version in versions],
+            "deleted": self._deleted[name].to_dict() if name in self._deleted else None,
+        }
+        encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+        return encoded.rstrip(b"=")
+
+    def restore_secret(self, backup_blob: bytes | str) -> tuple[str, SecretVersion]:
+        if isinstance(backup_blob, str):
+            backup_blob = backup_blob.encode("ascii")
+
+        padding = b"=" * (-len(backup_blob) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(backup_blob + padding).decode("utf-8"))
+        name = payload["name"]
+        if self.has_secret(name):
+            raise ValueError(name)
+
+        versions = [SecretVersion.from_dict(item) for item in payload["versions"]]
+        self._secrets[name] = versions
+        if payload.get("deleted"):
+            self._deleted[name] = SecretVersion.from_dict(payload["deleted"])
+        latest = versions[-1]
+        return name, latest
