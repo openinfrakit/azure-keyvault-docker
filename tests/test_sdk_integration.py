@@ -55,6 +55,18 @@ def launch_emulator(env: dict[str, str]) -> subprocess.Popen:
     )
 
 
+def stop_process(process: subprocess.Popen, timeout: float = 10) -> None:
+    if process.poll() is not None:
+        return
+
+    process.terminate()
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=timeout)
+
+
 def make_client() -> SecretClient:
     credential = ClientSecretCredential(
         tenant_id=TEST_TENANT_ID,
@@ -90,8 +102,7 @@ def emulator():
         wait_for_server()
         yield {"process": process, "env": env}
     finally:
-        process.terminate()
-        process.wait(timeout=10)
+        stop_process(process)
 
 
 def test_secret_crud_via_azure_sdk(emulator):
@@ -230,8 +241,7 @@ def test_secrets_persist_to_disk_across_restart(emulator):
     created = client.set_secret("persistent-secret", "survives-restart")
     assert STATE_FILE.exists()
 
-    emulator["process"].terminate()
-    emulator["process"].wait(timeout=10)
+    stop_process(emulator["process"])
     emulator["process"] = launch_emulator(emulator["env"])
     wait_for_server()
 
