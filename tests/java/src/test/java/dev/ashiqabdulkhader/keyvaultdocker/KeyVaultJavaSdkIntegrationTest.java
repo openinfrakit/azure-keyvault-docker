@@ -15,11 +15,14 @@ import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class KeyVaultJavaSdkIntegrationTest {
@@ -69,6 +72,51 @@ class KeyVaultJavaSdkIntegrationTest {
         assertTrue(deletedNames.contains(secretName));
         assertEquals(secretName, recovered.getName());
         assertFalse(latest.getVersion().isBlank());
+    }
+
+    @Test
+    void propertiesAndBackupFlowsWorkAgainstTheEmulator() throws Exception {
+        SecretClient client = createClient();
+        String secretName = "java-backup-" + UUID.randomUUID();
+
+        KeyVaultSecret first = client.setSecret(secretName, "v1");
+        KeyVaultSecret second = client.setSecret(secretName, "v2");
+
+        SecretProperties updated = second.getProperties();
+        updated.setContentType("application/test");
+        updated.setEnabled(false);
+        Map<String, String> tags = new HashMap<>();
+        tags.put("stage", "java");
+        updated.setTags(tags);
+        SecretProperties returned = client.updateSecretProperties(updated);
+
+        List<String> versions = new ArrayList<>();
+        client.listPropertiesOfSecretVersions(secretName).iterableByPage(1).forEach(page ->
+            page.getElements().forEach(secret -> versions.add(secret.getVersion()))
+        );
+
+        byte[] backup = client.backupSecret(secretName);
+        DeletedSecret deleted = client.beginDeleteSecret(secretName).poll().getValue();
+        DeletedSecret deletedSecret = client.getDeletedSecret(secretName);
+        client.purgeDeletedSecret(secretName);
+        KeyVaultSecret restored = client.restoreSecretBackup(backup);
+
+        List<String> secretNames = new ArrayList<>();
+        client.listPropertiesOfSecrets().iterableByPage(1).forEach(page ->
+            page.getElements().forEach(secret -> secretNames.add(secret.getName()))
+        );
+
+        assertEquals("application/test", returned.getContentType());
+        assertFalse(Boolean.TRUE.equals(returned.isEnabled()));
+        assertEquals("java", returned.getTags().get("stage"));
+        assertTrue(versions.contains(first.getProperties().getVersion()));
+        assertTrue(versions.contains(second.getProperties().getVersion()));
+        assertNotNull(backup);
+        assertTrue(backup.length > 0);
+        assertEquals(secretName, deleted.getName());
+        assertEquals(secretName, deletedSecret.getName());
+        assertEquals(secretName, restored.getName());
+        assertTrue(secretNames.contains(secretName));
     }
 
     private static SecretClient createClient() throws Exception {

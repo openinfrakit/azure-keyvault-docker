@@ -149,9 +149,9 @@ Important compatibility note:
 ## Tests
 
 The SDK integration tests are split by language:
-- [tests/python/test_sdk_integration.py](/C:/Users/MUKHADE/Workspace/azure-keyvault-docker/tests/python/test_sdk_integration.py)
-- [tests/java/test_java_sdk_integration.py](/C:/Users/MUKHADE/Workspace/azure-keyvault-docker/tests/java/test_java_sdk_integration.py)
-- [tests/java/src/test/java/dev/ashiqabdulkhader/keyvaultdocker/KeyVaultJavaSdkIntegrationTest.java](/C:/Users/MUKHADE/Workspace/azure-keyvault-docker/tests/java/src/test/java/dev/ashiqabdulkhader/keyvaultdocker/KeyVaultJavaSdkIntegrationTest.java)
+- [tests/python/test_sdk_integration.py](tests/python/test_sdk_integration.py)
+- [tests/java/test_java_sdk_integration.py](tests/java/test_java_sdk_integration.py)
+- [tests/java/src/test/java/dev/ashiqabdulkhader/keyvaultdocker/KeyVaultJavaSdkIntegrationTest.java](tests/java/src/test/java/dev/ashiqabdulkhader/keyvaultdocker/KeyVaultJavaSdkIntegrationTest.java)
 
 Run everything with:
 
@@ -159,14 +159,14 @@ Run everything with:
 uv run pytest
 ```
 
-The Java path bootstraps repo-local Maven automatically through [tests/java/run_maven.py](/C:/Users/MUKHADE/Workspace/azure-keyvault-docker/tests/java/run_maven.py), so no global Maven or Gradle install is required.
+The Java path bootstraps repo-local Maven automatically through [tests/java/run_maven.py](tests/java/run_maven.py), so no global Maven or Gradle install is required.
 
 The implementation is split into:
-- [src/azure_keyvault_docker/app.py](/C:/Users/MUKHADE/Workspace/azure-keyvault-docker/src/azure_keyvault_docker/app.py): HTTP routes, API-version checks, error shaping, and paging.
-- [src/azure_keyvault_docker/auth.py](/C:/Users/MUKHADE/Workspace/azure-keyvault-docker/src/azure_keyvault_docker/auth.py): local token issuance and bearer validation.
-- [src/azure_keyvault_docker/store.py](/C:/Users/MUKHADE/Workspace/azure-keyvault-docker/src/azure_keyvault_docker/store.py): in-memory plus disk-backed secret state.
-- [src/azure_keyvault_docker/certs.py](/C:/Users/MUKHADE/Workspace/azure-keyvault-docker/src/azure_keyvault_docker/certs.py): local HTTPS certificate generation.
-- [src/azure_keyvault_docker/config.py](/C:/Users/MUKHADE/Workspace/azure-keyvault-docker/src/azure_keyvault_docker/config.py): runtime configuration and ports.
+- [src/azure_keyvault_docker/app.py](src/azure_keyvault_docker/app.py): HTTP routes, API-version checks, error shaping, and paging.
+- [src/azure_keyvault_docker/auth.py](src/azure_keyvault_docker/auth.py): local token issuance and bearer validation.
+- [src/azure_keyvault_docker/store.py](src/azure_keyvault_docker/store.py): in-memory plus disk-backed secret state.
+- [src/azure_keyvault_docker/certs.py](src/azure_keyvault_docker/certs.py): local HTTPS certificate generation.
+- [src/azure_keyvault_docker/config.py](src/azure_keyvault_docker/config.py): runtime configuration and ports.
 
 ## Compatibility
 
@@ -187,16 +187,16 @@ The implementation is split into:
 | --- | --- | --- | --- |
 | Set secret | Supported | Supported | Creates a new version when the secret already exists. |
 | Get secret | Supported | Supported | Latest and explicit version paths supported. |
-| Update properties | Supported | Untested | Emulator supports tags, content type, enabled, `nbf`, `exp`. |
+| Update properties | Supported | Supported | Supports tags, content type, enabled, `nbf`, `exp`. |
 | List secrets | Supported | Supported | Paged responses supported. |
 | List versions | Supported | Supported | Paged responses supported. |
 | Delete secret | Supported | Supported | Soft-delete style flow. |
-| Get deleted secret | Supported | Untested | Supported after delete. |
+| Get deleted secret | Supported | Supported | Supported after delete. |
 | List deleted secrets | Supported | Supported | Paged responses supported. |
 | Recover deleted secret | Supported | Supported | Recovers latest active secret set. |
-| Purge deleted secret | Supported | Untested | Removes deleted secret permanently from local store. |
-| Backup secret | Supported | Untested | Backup format is emulator-local, not Azure-native. |
-| Restore secret | Supported | Untested | Restores all stored versions from emulator backup. |
+| Purge deleted secret | Supported | Supported | Removes deleted secret permanently from local store. |
+| Backup secret | Supported | Supported | Backup format is emulator-local, not Azure-native. |
+| Restore secret | Supported | Supported | Restores all stored versions from emulator backup. |
 | Secret expiry enforcement | Partial | Partial | Metadata is stored, but expiry/disabled checks are not fully enforced on every operation. |
 | API versions | `7.5`, `7.6` | `7.5` tested | Other versions return unsupported-version errors. |
 
