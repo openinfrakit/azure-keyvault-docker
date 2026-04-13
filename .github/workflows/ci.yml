@@ -1,4 +1,4 @@
-name: Test SDK Compatibility
+name: Test Python SDK Compatibility
 
 on:
   push:
@@ -10,7 +10,7 @@ on:
 
 jobs:
   test:
-    name: Python And Java SDK Tests
+    name: Python SDK Tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -24,12 +24,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-
       - name: Set up uv
         uses: astral-sh/setup-uv@v4
         with:
@@ -38,5 +32,5 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
-      - name: Run Python and Java SDK tests
+      - name: Run Python SDK tests
         run: uv run pytest

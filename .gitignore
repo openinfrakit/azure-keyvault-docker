@@ -137,7 +137,6 @@ celerybeat.pid
 # Environments
 .env
 .envrc
-.tools/
 .venv
 .local-certs/
 .local-data/

@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     vault_name: str = "local-vault"
     cert_dir: str = ".local-certs"
     data_dir: str = ".local-data"
-    supported_api_versions: tuple[str, ...] = ("7.6", "7.5")
+    supported_api_versions: tuple[str, ...] = ("7.6",)
     token_signing_key: str = Field(
         default="azure-keyvault-docker-local-signing-key",
         validation_alias=AliasChoices("EMULATOR_TOKEN_SIGNING_KEY", "token_signing_key"),

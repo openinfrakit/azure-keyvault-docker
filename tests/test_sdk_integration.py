@@ -1,23 +1,102 @@
 from __future__ import annotations
 
-import httpx
+import os
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
 import pytest
+import httpx
 from azure.core.exceptions import HttpResponseError, ResourceExistsError, ResourceNotFoundError
-
-from conftest import (
-    STATE_FILE,
-    TEST_CLIENT_ID,
-    TEST_CLIENT_SECRET,
-    TEST_TENANT_ID,
-    launch_emulator,
-    make_python_client,
-    stop_process,
-    wait_for_server,
-)
+from azure.identity import ClientSecretCredential
+from azure.keyvault.secrets import SecretClient
+from azure_keyvault_docker.certs import ensure_localhost_certificate
+from azure_keyvault_docker.config import get_settings
 
 
-def test_secret_crud_via_python_sdk(emulator):
-    client = make_python_client(emulator["port"])
+ROOT = Path(__file__).resolve().parents[1]
+STATE_FILE = ROOT / ".local-data" / "secrets.json"
+SERVER_CERT_FILE = ROOT / ".local-certs" / "localhost.pem"
+SERVER_KEY_FILE = ROOT / ".local-certs" / "localhost-key.pem"
+EMULATOR_PORT = None
+TEST_TENANT_ID = "11111111-2222-3333-4444-555555555555"
+TEST_CLIENT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+TEST_CLIENT_SECRET = "local-dev-secret"
+
+
+def reserve_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def wait_for_server() -> None:
+    import httpx
+
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        try:
+            response = httpx.get(f"https://127.0.0.1:{EMULATOR_PORT}/", verify=False)
+            if response.status_code == 200:
+                return
+        except Exception:
+            pass
+        time.sleep(0.25)
+    raise RuntimeError("server did not start")
+
+
+def launch_emulator(env: dict[str, str]) -> subprocess.Popen:
+    return subprocess.Popen(
+        [sys.executable, "-m", "azure_keyvault_docker"],
+        cwd=ROOT,
+        env=env,
+    )
+
+
+def make_client() -> SecretClient:
+    credential = ClientSecretCredential(
+        tenant_id=TEST_TENANT_ID,
+        client_id=TEST_CLIENT_ID,
+        client_secret=TEST_CLIENT_SECRET,
+        authority=f"127.0.0.1:{EMULATOR_PORT}",
+        disable_instance_discovery=True,
+        connection_verify=False,
+    )
+    return SecretClient(
+        vault_url=f"https://127.0.0.1:{EMULATOR_PORT}",
+        credential=credential,
+        verify_challenge_resource=False,
+        connection_verify=False,
+    )
+
+
+@pytest.fixture(scope="session")
+def emulator():
+    global EMULATOR_PORT
+    EMULATOR_PORT = reserve_port()
+    for cert_path in (SERVER_CERT_FILE, SERVER_KEY_FILE):
+        if cert_path.exists():
+            cert_path.unlink()
+    ensure_localhost_certificate(get_settings())
+    if STATE_FILE.exists():
+        STATE_FILE.unlink()
+    env = os.environ.copy()
+    env["EMULATOR_PORT"] = str(EMULATOR_PORT)
+    env["EMULATOR_ISSUER_PORT"] = str(EMULATOR_PORT)
+    process = launch_emulator(env)
+    try:
+        wait_for_server()
+        yield {"process": process, "env": env}
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+
+def test_secret_crud_via_azure_sdk(emulator):
+    _ = emulator
+    client = make_client()
 
     created = client.set_secret("example-secret", "hello")
     fetched = client.get_secret("example-secret")
@@ -30,8 +109,9 @@ def test_secret_crud_via_python_sdk(emulator):
     assert deleted.name == "example-secret"
 
 
-def test_secret_versions_and_properties_via_python_sdk(emulator):
-    client = make_python_client(emulator["port"])
+def test_secret_versions_and_properties_via_azure_sdk(emulator):
+    _ = emulator
+    client = make_client()
 
     first = client.set_secret("versioned-secret", "v1", tags={"stage": "one"}, content_type="text/plain")
     second = client.set_secret("versioned-secret", "v2")
@@ -56,8 +136,9 @@ def test_secret_versions_and_properties_via_python_sdk(emulator):
     assert {item.version for item in versions} == {first.properties.version, second.properties.version}
 
 
-def test_deleted_secret_recover_and_purge_via_python_sdk(emulator):
-    client = make_python_client(emulator["port"])
+def test_deleted_secret_recover_and_purge_via_azure_sdk(emulator):
+    _ = emulator
+    client = make_client()
 
     client.set_secret("recoverable-secret", "recover-me", tags={"kind": "demo"})
     deleted = client.begin_delete_secret("recoverable-secret").result()
@@ -74,8 +155,9 @@ def test_deleted_secret_recover_and_purge_via_python_sdk(emulator):
         client.get_deleted_secret("recoverable-secret")
 
 
-def test_backup_and_restore_via_python_sdk(emulator):
-    client = make_python_client(emulator["port"])
+def test_backup_and_restore_via_azure_sdk(emulator):
+    _ = emulator
+    client = make_client()
 
     original = client.set_secret("backup-secret", "alpha", tags={"source": "test"}, content_type="text/plain")
     client.set_secret("backup-secret", "beta")
@@ -96,7 +178,8 @@ def test_backup_and_restore_via_python_sdk(emulator):
 
 
 def test_restore_conflicts_when_secret_exists(emulator):
-    client = make_python_client(emulator["port"])
+    _ = emulator
+    client = make_client()
 
     client.set_secret("restore-conflict-secret", "first")
     backup = client.backup_secret("restore-conflict-secret")
@@ -105,8 +188,9 @@ def test_restore_conflicts_when_secret_exists(emulator):
         client.restore_secret_backup(backup)
 
 
-def test_paged_secret_listings_via_python_sdk(emulator):
-    client = make_python_client(emulator["port"])
+def test_paged_secret_listings_via_azure_sdk(emulator):
+    _ = emulator
+    client = make_client()
 
     secret_names = [f"paged-secret-{index}" for index in range(5)]
     for index, name in enumerate(secret_names):
@@ -118,8 +202,9 @@ def test_paged_secret_listings_via_python_sdk(emulator):
         assert name in listed_names
 
 
-def test_paged_version_and_deleted_listings_via_python_sdk(emulator):
-    client = make_python_client(emulator["port"])
+def test_paged_version_and_deleted_listings_via_azure_sdk(emulator):
+    _ = emulator
+    client = make_client()
 
     client.set_secret("paged-versions-secret", "v1")
     client.set_secret("paged-versions-secret", "v2")
@@ -141,15 +226,16 @@ def test_paged_version_and_deleted_listings_via_python_sdk(emulator):
 
 
 def test_secrets_persist_to_disk_across_restart(emulator):
-    client = make_python_client(emulator["port"])
+    client = make_client()
     created = client.set_secret("persistent-secret", "survives-restart")
     assert STATE_FILE.exists()
 
-    stop_process(emulator["process"])
+    emulator["process"].terminate()
+    emulator["process"].wait(timeout=10)
     emulator["process"] = launch_emulator(emulator["env"])
-    wait_for_server(emulator["port"])
+    wait_for_server()
 
-    restarted_client = make_python_client(emulator["port"])
+    restarted_client = make_client()
     fetched = restarted_client.get_secret("persistent-secret")
 
     assert fetched.value == "survives-restart"
@@ -157,8 +243,9 @@ def test_secrets_persist_to_disk_across_restart(emulator):
 
 
 def test_unsupported_api_version_returns_azure_style_error(emulator):
+    _ = emulator
     token_response = httpx.post(
-        f"https://127.0.0.1:{emulator['port']}/{TEST_TENANT_ID}/oauth2/v2.0/token",
+        f"https://127.0.0.1:{EMULATOR_PORT}/{TEST_TENANT_ID}/oauth2/v2.0/token",
         data={
             "grant_type": "client_credentials",
             "client_id": TEST_CLIENT_ID,
@@ -169,7 +256,7 @@ def test_unsupported_api_version_returns_azure_style_error(emulator):
     )
     token = token_response.json()["access_token"]
     response = httpx.get(
-        f"https://127.0.0.1:{emulator['port']}/secrets/missing-secret",
+        f"https://127.0.0.1:{EMULATOR_PORT}/secrets/missing-secret",
         params={"api-version": "2099-01-01"},
         headers={"Authorization": f"Bearer {token}"},
         verify=False,
@@ -178,26 +265,3 @@ def test_unsupported_api_version_returns_azure_style_error(emulator):
     assert response.status_code == 400
     payload = response.json()
     assert payload["error"]["code"] == "UnsupportedApiVersion"
-
-
-def test_supported_api_versions_include_python_legacy_version(emulator):
-    token_response = httpx.post(
-        f"https://127.0.0.1:{emulator['port']}/{TEST_TENANT_ID}/oauth2/v2.0/token",
-        data={
-            "grant_type": "client_credentials",
-            "client_id": TEST_CLIENT_ID,
-            "client_secret": TEST_CLIENT_SECRET,
-            "scope": "https://vault.azure.net/.default",
-        },
-        verify=False,
-    )
-    token = token_response.json()["access_token"]
-    response = httpx.get(
-        f"https://127.0.0.1:{emulator['port']}/secrets/missing-secret",
-        params={"api-version": "7.5"},
-        headers={"Authorization": f"Bearer {token}"},
-        verify=False,
-    )
-
-    assert response.status_code == 404
-    assert response.json()["error"]["code"] == "SecretNotFound"
