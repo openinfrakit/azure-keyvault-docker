@@ -23,7 +23,7 @@ Run with Docker:
 
 ```powershell
 docker build -t azure-keyvault-docker .
-docker run --rm -p 8443:8443 --env-file .env azure-keyvault-docker
+docker run --rm -p 8443:8443 azure-keyvault-docker
 ```
 
 ## Python SDK Usage
@@ -31,15 +31,16 @@ docker run --rm -p 8443:8443 --env-file .env azure-keyvault-docker
 This emulator is designed around the official Python SDK path:
 - `azure-identity` for token acquisition
 - `azure-keyvault-secrets` for secrets operations
+- no pre-registered client credentials are required
 
 ```python
 from azure.identity import ClientSecretCredential
 from azure.keyvault.secrets import SecretClient
 
 credential = ClientSecretCredential(
-    tenant_id="...",
-    client_id="...",
-    client_secret="...",
+    tenant_id="any-tenant-id-you-want-to-use",
+    client_id="any-client-id-you-want-to-use",
+    client_secret="any-client-secret-you-want-to-use",
     authority="127.0.0.1:8443",
     disable_instance_discovery=True,
     connection_verify=False,
@@ -90,8 +91,9 @@ client = SecretClient(
 2. The Key Vault SDK sends an unauthenticated request to the local vault URL.
 3. The emulator responds with a Key Vault-style `WWW-Authenticate` challenge.
 4. `azure-identity` discovers the emulator's OpenID configuration and requests a token from the local token endpoint.
-5. The SDK retries the original request with a bearer token.
-6. The emulator serves the request from the local secrets store and persists changes to disk.
+5. The emulator accepts the caller-provided tenant, client ID, and client secret and issues a local token.
+6. The SDK retries the original request with a bearer token.
+7. The emulator serves the request from the local secrets store and persists changes to disk.
 
 The implementation is split into:
 - [src/azure_keyvault_docker/app.py](/C:/Users/MUKHADE/Workspace/azure-keyvault-docker/src/azure_keyvault_docker/app.py): HTTP routes, API-version checks, error shaping, and paging.
@@ -136,4 +138,5 @@ The implementation is split into:
 - For Docker-first usage, the intended path is to use the official Azure SDK with `connection_verify=False` so no local trust-store setup is required.
 - Secret state is persisted in `.local-data/secrets.json`.
 - The host and port can be overridden with `EMULATOR_HOST` and `EMULATOR_PORT`.
+- The emulator does not require `.env` or preconfigured client credentials. It accepts whatever non-empty tenant/client/secret the SDK caller provides.
 - This project is intentionally shaped around real SDK behavior first, then broader Azure fidelity over time.

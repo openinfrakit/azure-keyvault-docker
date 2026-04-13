@@ -30,9 +30,9 @@ class Authenticator:
         self._settings = settings
 
     def issue_token(self, tenant_id: str, client_id: str, client_secret: str, scope: str) -> dict[str, str | int]:
-        if tenant_id != self._settings.kv_tenant_id:
+        if not tenant_id:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_tenant")
-        if client_id != self._settings.kv_client_id or client_secret != self._settings.kv_client_secret:
+        if not client_id or not client_secret:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_client")
 
         expires_at = datetime.now(UTC) + timedelta(hours=1)
@@ -62,7 +62,7 @@ class Authenticator:
             signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
             expected_signature = _b64url(
                 hmac.new(
-                    self._settings.kv_client_secret.encode("utf-8"),
+                    self._settings.token_signing_key.encode("utf-8"),
                     signing_input,
                     hashlib.sha256,
                 ).digest()
@@ -100,7 +100,7 @@ class Authenticator:
         signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
         signature_b64 = _b64url(
             hmac.new(
-                self._settings.kv_client_secret.encode("utf-8"),
+                self._settings.token_signing_key.encode("utf-8"),
                 signing_input,
                 hashlib.sha256,
             ).digest()

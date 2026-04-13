@@ -1,12 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
-
-from dotenv import load_dotenv
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-load_dotenv(Path(".env"))
 
 
 class Settings(BaseSettings):
@@ -20,10 +15,10 @@ class Settings(BaseSettings):
     cert_dir: str = ".local-certs"
     data_dir: str = ".local-data"
     supported_api_versions: tuple[str, ...] = ("7.6",)
-
-    kv_client_id: str = Field(alias="KV_CLIENT_ID")
-    kv_client_secret: str = Field(alias="KV_CLIENT_SECRET")
-    kv_tenant_id: str = Field(alias="KV_TENANT_ID")
+    token_signing_key: str = Field(
+        default="azure-keyvault-docker-local-signing-key",
+        validation_alias=AliasChoices("EMULATOR_TOKEN_SIGNING_KEY", "token_signing_key"),
+    )
 
     @property
     def authority(self) -> str:

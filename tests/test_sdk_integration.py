@@ -12,17 +12,18 @@ import httpx
 from azure.core.exceptions import HttpResponseError, ResourceExistsError, ResourceNotFoundError
 from azure.identity import ClientSecretCredential
 from azure.keyvault.secrets import SecretClient
-from dotenv import load_dotenv
 from azure_keyvault_docker.certs import ensure_localhost_certificate
 from azure_keyvault_docker.config import get_settings
 
 
 ROOT = Path(__file__).resolve().parents[1]
-load_dotenv(ROOT / ".env")
 STATE_FILE = ROOT / ".local-data" / "secrets.json"
 SERVER_CERT_FILE = ROOT / ".local-certs" / "localhost.pem"
 SERVER_KEY_FILE = ROOT / ".local-certs" / "localhost-key.pem"
 EMULATOR_PORT = None
+TEST_TENANT_ID = "11111111-2222-3333-4444-555555555555"
+TEST_CLIENT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+TEST_CLIENT_SECRET = "local-dev-secret"
 
 
 def reserve_port() -> int:
@@ -56,9 +57,9 @@ def launch_emulator(env: dict[str, str]) -> subprocess.Popen:
 
 def make_client() -> SecretClient:
     credential = ClientSecretCredential(
-        tenant_id=os.environ["KV_TENANT_ID"],
-        client_id=os.environ["KV_CLIENT_ID"],
-        client_secret=os.environ["KV_CLIENT_SECRET"],
+        tenant_id=TEST_TENANT_ID,
+        client_id=TEST_CLIENT_ID,
+        client_secret=TEST_CLIENT_SECRET,
         authority=f"127.0.0.1:{EMULATOR_PORT}",
         disable_instance_discovery=True,
         connection_verify=False,
@@ -82,15 +83,6 @@ def emulator():
     if STATE_FILE.exists():
         STATE_FILE.unlink()
     env = os.environ.copy()
-    env.update({
-        key: value
-        for key, value in {
-            "KV_CLIENT_ID": os.environ.get("KV_CLIENT_ID"),
-            "KV_CLIENT_SECRET": os.environ.get("KV_CLIENT_SECRET"),
-            "KV_TENANT_ID": os.environ.get("KV_TENANT_ID"),
-        }.items()
-        if value
-    })
     env["EMULATOR_PORT"] = str(EMULATOR_PORT)
     env["EMULATOR_ISSUER_PORT"] = str(EMULATOR_PORT)
     process = launch_emulator(env)
@@ -253,11 +245,11 @@ def test_secrets_persist_to_disk_across_restart(emulator):
 def test_unsupported_api_version_returns_azure_style_error(emulator):
     _ = emulator
     token_response = httpx.post(
-        f"https://127.0.0.1:{EMULATOR_PORT}/{os.environ['KV_TENANT_ID']}/oauth2/v2.0/token",
+        f"https://127.0.0.1:{EMULATOR_PORT}/{TEST_TENANT_ID}/oauth2/v2.0/token",
         data={
             "grant_type": "client_credentials",
-            "client_id": os.environ["KV_CLIENT_ID"],
-            "client_secret": os.environ["KV_CLIENT_SECRET"],
+            "client_id": TEST_CLIENT_ID,
+            "client_secret": TEST_CLIENT_SECRET,
             "scope": "https://vault.azure.net/.default",
         },
         verify=False,
